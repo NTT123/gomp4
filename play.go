@@ -2,7 +2,6 @@ package main
 
 import (
 	"fmt"
-	"io"
 	"io/ioutil"
 	"net/http"
 	"os"
@@ -23,21 +22,33 @@ type Con struct {
 var wg sync.WaitGroup
 
 func main() {
-	fmt.Println("http://127.0.0.1:8888/")
-	f, _ := os.OpenFile("hi.mp4", os.O_TRUNC|os.O_WRONLY|os.O_CREATE, 0755)
 
-	res, _ := http.Get(os.Args[1])
+	if len(os.Args) != 3 {
+		fmt.Printf("Usage: %s filename url\n", os.Args[0])
+		return
+	}
+
+	fmt.Println("Downloading!")
+
+	url := os.Args[2]
+	filename := os.Args[1]
+
+	res, _ := http.Get(url)
 	maps := res.Header
 	length, _ := strconv.ParseInt(maps["Content-Length"][0], 10, 64)
+
+	f, _ := os.OpenFile(filename, os.O_WRONLY|os.O_CREATE, 0655)
+	f.Seek(length, 0)
 
 	ch := make(chan DT, 100)
 	chcon := make(chan Con)
 
 	var limit int64 = 100
 	len_sub := length / limit
-	//diff := length % limit
+
 	cons := make([]Con, limit)
 	cons[0] = Con{0, len_sub}
+
 	cons[1] = Con{length - 1024*1024, length}
 	cons[2] = Con{length - 1024*1024, length}
 	cons[3] = Con{length - 1024*1024, length}
@@ -52,57 +63,27 @@ func main() {
 		chcon <- cons[4]
 
 		for i = 2; i < limit; i++ {
-			fmt.Printf("\r  %0.2f%%   ", float64(i)*100.0/float64(limit))
 			cons[i] = Con{(i - 1) * len_sub, i * len_sub}
 			chcon <- cons[i]
+			fmt.Printf("\r  %0.2f%%   ", float64(i+1)*100.0/float64(limit))
 		}
 	}()
 
 	ncon := 6
 
-	wg.Add(int(limit))
+	wg.Add(int(limit + 3))
 
 	go func() {
-
-		all := make([]byte, length)
-
-		go func() {
-			handler := func(w http.ResponseWriter, r *http.Request) {
-				if _, ok := r.Header["Range"]; ok {
-					s := r.Header["Range"][0][6:]
-					var min, max int64
-					fmt.Scanf(s, "%d-%d", &min, &max)
-					fmt.Println(min, max)
-
-					client := &http.Client{}
-					req, _ := http.NewRequest("GET", os.Args[1], nil)
-					range_header := fmt.Sprintf("bytes=%d-%d", min, max)
-					req.Header.Add("Range", range_header)
-					resp, _ := client.Do(req)
-					reader, _ := ioutil.ReadAll(resp.Body)
-					resp.Body.Close()
-					w.Write(reader)
-
-				} else {
-					for k, v := range maps {
-						w.Header().Set(k, v[0])
-					}
-
-					io.WriteString(w, "Hello")
-				}
-			}
-
-			http.HandleFunc("/", handler)
-			http.ListenAndServe(":8888", nil)
-		}()
-
 		for c := range ch {
-			copy(all[c.At:c.At+int64(len(c.Data))], c.Data)
+			f.Seek(c.At, 0)
+			f.Write(c.Data)
+			f.Sync()
 			wg.Done()
 		}
 	}()
 
 	var i int64
+
 	for i = 0; i < int64(ncon); i++ {
 
 		go func() {
@@ -110,19 +91,25 @@ func main() {
 				min := co.Min
 				max := co.Max
 
-				client := &http.Client{}
-				req, _ := http.NewRequest("GET", os.Args[1], nil)
-				range_header := fmt.Sprintf("bytes=%d-%d", min, max-1)
-				req.Header.Add("Range", range_header)
-				resp, _ := client.Do(req)
-				reader, _ := ioutil.ReadAll(resp.Body)
-				resp.Body.Close()
-				ch <- DT{reader, min}
+				for {
+					client := &http.Client{}
+					req, _ := http.NewRequest("GET", url, nil)
+					range_header := fmt.Sprintf("bytes=%d-%d", min, max-1)
+					req.Header.Add("Range", range_header)
+					resp, _ := client.Do(req)
+					reader, _ := ioutil.ReadAll(resp.Body)
+					resp.Body.Close()
+					if int64(len(reader)) == max-min {
+						ch <- DT{reader, min}
+						break
+					}
+				}
 
 			}
 		}()
 	}
+
 	wg.Wait()
 	f.Close()
-
+	fmt.Println()
 }
